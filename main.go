@@ -154,10 +154,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	address := ":8080"
+	address := ":49152"
 	//advertiseAddress := "127.0.0.1:8080" // Replace with a proper address if needed
 
-	transport, err := raft.NewTCPTransport(address, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8080}, 3, 5*time.Second, os.Stderr)
+	transport, err := raft.NewTCPTransport(address, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 49152}, 3, 5*time.Second, os.Stderr)
 	if err != nil {
 		log.Fatal(err)
 	}
