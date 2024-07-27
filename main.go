@@ -212,7 +212,11 @@ func main() {
 		fmt.Fprintf(w, "Stored\n")
 	})
 
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "3000"
+	}
+	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, nil))
 }
 
 // http://localhost:8081/put?key=mykey&value=myvalue
