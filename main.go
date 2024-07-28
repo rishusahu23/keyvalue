@@ -6,23 +6,22 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/raft-boltdb"
+	"github.com/serialx/hashring"
 	"io"
-	"os"
 )
 
-// Command represents a set or delete operation
 type Command struct {
 	Op    string `json:"op"`
 	Key   string `json:"key"`
 	Value string `json:"value,omitempty"`
 }
 
-// KeyValueStore represents a thread-safe key-value store
 type KeyValueStore struct {
 	mu    sync.RWMutex
 	store map[string]string
@@ -53,19 +52,16 @@ func (kv *KeyValueStore) Delete(key string) {
 	delete(kv.store, key)
 }
 
-// FSM implements the raft.FSM interface
 type FSM struct {
 	kv *KeyValueStore
 }
 
-// NewFSM creates a new FSM instance
 func NewFSM(kv *KeyValueStore) *FSM {
 	return &FSM{
 		kv: kv,
 	}
 }
 
-// Apply applies a Raft log entry to the key-value store
 func (f *FSM) Apply(log *raft.Log) interface{} {
 	var command Command
 	if err := json.Unmarshal(log.Data, &command); err != nil {
@@ -80,7 +76,6 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 	return nil
 }
 
-// Snapshot returns a snapshot of the current state of the FSM
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.kv.mu.RLock()
 	defer f.kv.mu.RUnlock()
@@ -91,7 +86,6 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	return &Snapshot{store: storeCopy}, nil
 }
 
-// Restore restores the FSM from a snapshot
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	var store map[string]string
 	if err := json.NewDecoder(rc).Decode(&store); err != nil {
@@ -103,12 +97,10 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	return nil
 }
 
-// Snapshot represents a snapshot of the FSM
 type Snapshot struct {
 	store map[string]string
 }
 
-// Persist saves the snapshot to the given sink
 func (s *Snapshot) Persist(sink raft.SnapshotSink) error {
 	if err := func() error {
 		data, err := json.Marshal(s.store)
@@ -127,17 +119,18 @@ func (s *Snapshot) Persist(sink raft.SnapshotSink) error {
 	return nil
 }
 
-// Release releases the snapshot
 func (s *Snapshot) Release() {}
 
 var (
 	kvStore  *KeyValueStore
 	raftNode *raft.Raft
+	ring     *hashring.HashRing
+	nodes    = []string{"server1"}
 )
 
 func main() {
 	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID("server1") // Set a unique LocalID for the node
+	config.LocalID = raft.ServerID("server1")
 
 	store, err := raftboltdb.NewBoltStore("raft.db")
 	if err != nil {
@@ -155,7 +148,7 @@ func main() {
 	}
 
 	address := ":49152"
-	//advertiseAddress := "127.0.0.1:8080" // Replace with a proper address if needed
+	//advertiseAddress := "127.0.0.1:8080"
 
 	transport, err := raft.NewTCPTransport(address, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 49152}, 3, 5*time.Second, os.Stderr)
 	if err != nil {
@@ -177,15 +170,18 @@ func main() {
 
 	raftNode.BootstrapCluster(bootstrapConfig)
 
-	// Optional: Bootstrap or join a Raft cluster here if needed
+	ring = hashring.New(nodes)
 
-	// Set up HTTP handlers for client interactions
 	http.HandleFunc("/get", func(w http.ResponseWriter, req *http.Request) {
 		key := req.URL.Query().Get("key")
-		if value, exists := kvStore.Get(key); exists {
-			fmt.Fprintf(w, "Value: %s\n", value)
+		if node, _ := ring.GetNode(key); raft.ServerID(node) == config.LocalID {
+			if value, exists := kvStore.Get(key); exists {
+				fmt.Fprintf(w, "Value: %s\n", value)
+			} else {
+				http.Error(w, "Key not found", http.StatusNotFound)
+			}
 		} else {
-			http.Error(w, "Key not found", http.StatusNotFound)
+			http.Error(w, "Key not handled by this node", http.StatusBadRequest)
 		}
 	})
 
@@ -193,23 +189,27 @@ func main() {
 		key := req.URL.Query().Get("key")
 		value := req.URL.Query().Get("value")
 
-		command := Command{
-			Op:    "set",
-			Key:   key,
-			Value: value,
-		}
-		data, err := json.Marshal(command)
-		if err != nil {
-			http.Error(w, "Error creating command", http.StatusInternalServerError)
-			return
-		}
+		if node, _ := ring.GetNode(key); raft.ServerID(node) == config.LocalID {
+			command := Command{
+				Op:    "set",
+				Key:   key,
+				Value: value,
+			}
+			data, err := json.Marshal(command)
+			if err != nil {
+				http.Error(w, "Error creating command", http.StatusInternalServerError)
+				return
+			}
 
-		applyFuture := raftNode.Apply(data, 10*time.Second)
-		if err := applyFuture.Error(); err != nil {
-			http.Error(w, "Error applying command", http.StatusInternalServerError)
-			return
+			applyFuture := raftNode.Apply(data, 10*time.Second)
+			if err := applyFuture.Error(); err != nil {
+				http.Error(w, "Error applying command", http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, "Stored\n")
+		} else {
+			http.Error(w, "Key not handled by this node", http.StatusBadRequest)
 		}
-		fmt.Fprintf(w, "Stored\n")
 	})
 
 	port := os.Getenv("PORT")
@@ -218,6 +218,3 @@ func main() {
 	}
 	log.Fatal(http.ListenAndServe("0.0.0.0:"+port, nil))
 }
-
-// http://localhost:8081/put?key=mykey&value=myvalue
-// http://localhost:8081/get?key=rishu
