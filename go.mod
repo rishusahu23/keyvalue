@@ -5,6 +5,7 @@ go 1.19
 require (
 	github.com/hashicorp/raft v1.7.0
 	github.com/hashicorp/raft-boltdb v0.0.0-20231211162105-6c830fa4535e
+	github.com/serialx/hashring v0.0.0-20200727003509-22c0c7ab6b1b
 )
 
 require (
